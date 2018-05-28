@@ -5,6 +5,8 @@ from article_helpers import *
 from base_handler import *
 from search_helpers import *
 from user_account_helpers import *
+import tornado.gen
+from tornado.concurrent import run_on_executor
 
 # For GitHub OAuth
 import requests
@@ -652,3 +654,41 @@ class AddRowEndpointHandler(BaseHandler):
             response["success"] = 0
             response["description"] = "Wrong number of coordinates."
         return response
+
+
+class GetOaPdfEndpointHandler(BaseHandler):
+    """ Flag a table as inaccurate. """
+
+    parameters = {
+        "doi": {
+            "type": str
+        }
+    }
+
+    endpoint_type = Endpoint.PULL_API
+    asynchronous = True
+
+    @run_on_executor
+    def get_pdf_bytes(url):
+        response = requests.get(url)
+        return response.content
+
+    @tornado.gen.coroutine
+    def process(self, response, args):
+        doi = args['doi']
+        unpaywallURL = 'https://api.unpaywall.org/v2/${doi}?email=keshavan@berkeley.edu'
+        req = requests.get(unpaywallURL)
+        res = req.json()
+        print(res.keys(), res['error'])
+        data = res['data']
+        if data['best_oa_location']:
+            # get pdf
+            pdf_url = data['best_oa_location']['url_for_pdf']
+            pdf_bytes = yield self.get_pdf_bytes(pdf_url)
+            self.set_header("Content-Type", "application/pdf")
+            self.write(pdf_bytes)
+            self.finish()
+        else:
+            response['success'] = 0
+            self.set_status(401)
+            self.finish_async(response)
