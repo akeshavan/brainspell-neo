@@ -6,8 +6,22 @@ from base_handler import *
 from search_helpers import *
 from user_account_helpers import *
 
+# For GitHub OAuth
+import requests
+import urllib.parse
+import os
+import hashlib
+
 REQ_DESC = "The fields to search through. 'x' is experiments, 'p' is PMID, 'r' is reference, and 't' is title + authors + abstract."
 START_DESC = "The offset of the articles to show; e.g., start = 10 would return results 11 - 20."
+
+assert "github_frontend_client_id" in os.environ \
+    and "github_frontend_client_secret" in os.environ, \
+    "You need to set the 'github_frontend_client_id' and 'github_frontend_client_secret' environment variables."
+
+assert "github_frontend_dev_client_id" in os.environ \
+    and "github_frontend_dev_client_secret" in os.environ, \
+    "You need to set the 'github_frontend_dev_client_id' and 'github_frontend_dev_client_secret' environment variables."
 
 
 class ListEndpointsEndpointHandler(BaseHandler):
@@ -25,7 +39,72 @@ class ListEndpointsEndpointHandler(BaseHandler):
         return response
 
 
+# BEGIN: Authentication endpoints
+
+class GithubOauthProductionEndpointHandler(BaseHandler):
+    """ GitHub login authentication. Return the GitHub token and
+    Brainspell API key. """
+
+    parameters = {
+        "code": {
+            "type": str,
+            "description": "The code returned after GitHub OAuth."
+        }
+    }
+
+    endpoint_type = Endpoint.PULL_API
+
+    client_id_key = "github_frontend_client_id"
+    client_secret_key = "github_frontend_client_secret"
+
+    def process(self, response, args):
+        code = args["code"]
+
+        data = {
+            "client_id": os.environ[self.client_id_key],
+            "client_secret": os.environ[self.client_secret_key],
+            "code": code
+        }
+
+        # TODO: Make asynchronous, since this is blocking.
+        result = requests.post(
+            "https://github.com:443/login/oauth/access_token",
+            data
+        )
+
+        params = urllib.parse.parse_qs(result.text)
+
+        try:
+            response["github_token"] = params["access_token"][0]
+            user_data = requests.get(
+                "https://api.github.com/user",
+                headers={
+                    "Authorization": "token " +
+                    params["access_token"][0]})
+            user = user_data.json()
+            # idempotent operation to make sure GitHub user is in our
+            # database
+            register_github_user(user)
+            hasher = hashlib.sha1()
+            hasher.update(str(user["id"]).encode('utf-8'))
+            api_key = hasher.hexdigest()
+            response["api_key"] = api_key
+        except BaseException:
+            response["success"] = 0
+            response["description"] = "Authentication failed."
+
+        return response
+
+
+class GithubOauthDevelopmentEndpointHandler(
+        GithubOauthProductionEndpointHandler):
+    """ Endpoint for development OAuth. """
+
+    client_id_key = "github_frontend_dev_client_id"
+    client_secret_key = "github_frontend_dev_client_secret"
+
 # BEGIN: search API endpoints
+
 
 class QueryEndpointHandler(BaseHandler):
     """ Endpoint to handle search queries. Return 10 results at a time. """

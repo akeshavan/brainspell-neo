@@ -41,6 +41,8 @@ class GithubLoginHandler(tornado.web.RequestHandler, torngithub.GithubMixin):
     """ Handle GitHub OAuth. """
 
     route = "oauth"
+    settings_key_id = "github_client_id"
+    settings_key_secret = "github_client_secret"
 
     @tornado.gen.coroutine
     def get(self):
@@ -60,8 +62,8 @@ class GithubLoginHandler(tornado.web.RequestHandler, torngithub.GithubMixin):
         if self.get_argument("code", False):
             user = yield self.get_authenticated_user(
                 redirect_uri=redirect_uri,
-                client_id=settings["github_client_id"],
-                client_secret=settings["github_client_secret"],
+                client_id=settings[self.settings_key_id],
+                client_secret=settings[self.settings_key_secret],
                 code=self.get_argument("code")
             )
 
@@ -70,7 +72,7 @@ class GithubLoginHandler(tornado.web.RequestHandler, torngithub.GithubMixin):
                 self.set_secure_cookie("user", json_encode(user))
                 # idempotent operation to make sure GitHub user is in our
                 # database
-                register_github_user(json_encode(user))
+                register_github_user(user)
                 # generate a Brainspell API key
                 hasher = hashlib.sha1()
                 hasher.update(str(user["id"]).encode('utf-8'))
@@ -84,7 +86,7 @@ class GithubLoginHandler(tornado.web.RequestHandler, torngithub.GithubMixin):
         # otherwise we need to request an authorization code
         yield self.authorize_redirect(
             redirect_uri=redirect_uri,
-            client_id=settings["github_client_id"],
+            client_id=settings[self.settings_key_id],
             extra_params={"scope": "repo"})
 
 
@@ -132,7 +134,7 @@ def get_user_repos(http_client, access_token):
         access_token=access_token) for i in range(2, max_pages + 1)]
 
     for repo in repos_list:
-        data.extend(res.body)
+        data.extend(repo.body)
 
     raise tornado.gen.Return(data)
 
@@ -493,13 +495,19 @@ class AddToCollectionEndpointHandler(BaseHandler, torngithub.GithubMixin):
                     args["key"])
                 github_collection_name = "brainspell-collection-{}".format(
                     name)
-                content_data = yield torngithub.github_request(
-                    self.get_auth_http_client(),
-                    '/repos/{owner}/{repo}/contents/{path}'.format(owner=github_username,
-                                                                   repo=github_collection_name,
-                                                                   path="manifest.json"),
-                    access_token=args["github_access_token"],
-                    method="GET")
+                try:
+                    content_data = yield torngithub.github_request(
+                        self.get_auth_http_client(),
+                        '/repos/{owner}/{repo}/contents/{path}'.format(owner=github_username,
+                                                                       repo=github_collection_name,
+                                                                       path="manifest.json"),
+                        access_token=args["github_access_token"],
+                        method="GET")
+                except BaseException as e:
+                    response["success"] = 0
+                    response["description"] = "The request failed. Make sure that the manifest.json file exists in your repository."
+                    response["exception"] = str(e)
+                    self.finish_async(response)
                 content = content_data["body"]["content"]
                 # get the SHA so we can update this file
                 manifest_sha = content_data["body"]["sha"]
@@ -531,14 +539,19 @@ class AddToCollectionEndpointHandler(BaseHandler, torngithub.GithubMixin):
                     "sha": manifest_sha
                 }
 
-                update_manifest_ress = yield [torngithub.github_request(
-                    self.get_auth_http_client(),
-                    '/repos/{owner}/{repo}/contents/{path}'.format(owner=github_username,
-                                                                   repo=github_collection_name,
-                                                                   path="manifest.json"),
-                    access_token=args["github_access_token"],
-                    method="PUT",
-                    body=update_manifest_body)]
+                try:
+                    update_manifest_ress = yield [torngithub.github_request(
+                        self.get_auth_http_client(),
+                        '/repos/{owner}/{repo}/contents/{path}'.format(owner=github_username,
+                                                                       repo=github_collection_name,
+                                                                       path="manifest.json"),
+                        access_token=args["github_access_token"],
+                        method="PUT",
+                        body=update_manifest_body)]
+                except BaseException as e:
+                    response["success"] = 0
+                    response["description"] = "The request failed. Make sure that you have write permissions for the manifest.json file in your repository."
+                    response["exception"] = str(e)
 
                 # actually add the article(s) if the request succeeds
                 bulk_add_articles_to_brainspell_database_collection(
